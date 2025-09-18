@@ -1,0 +1,8 @@
+opencv-python
+pytesseract
+numpy
+PyMuPDF
+Pillow
+langchain
+paddleocr
+paddlepaddle
