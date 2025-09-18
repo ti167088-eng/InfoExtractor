@@ -4,5 +4,3 @@ numpy
 PyMuPDF
 Pillow
 langchain
-paddleocr
-paddlepaddle
