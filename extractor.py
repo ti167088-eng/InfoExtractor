@@ -293,7 +293,7 @@ class PDFExtractor:
 # CLI/testing harness
 # -------------------------
 if __name__ == "__main__":
-    sample_pdf = r"C:\Users\pc\Downloads\Mojo Leads-20250917T091038Z-1-001\Mojo Leads\Moiz PPO Orders\MYRTLE K HESS\Copy of MYRTLE K HESS CN wrist.pdf"
+    sample_pdf = r"C:\Users\pc\Downloads\Mojo Leads-20250917T091038Z-1-001\Mojo Leads\Moiz PPO Orders\Terry Doebler\Terry Doebler CN.pdf"
     extractor = PDFExtractor()
     # set debug_dir to inspect processed page images
     docs = extractor.text_extractor(sample_pdf, debug_dir="debug_ocr")
@@ -303,7 +303,7 @@ if __name__ == "__main__":
         print(f"Metadata: {json.dumps(d.metadata, indent=2) if d.metadata else None}")
 
     os.makedirs("results", exist_ok=True)
-    with open("results/extractor.json", "w", encoding="utf-8") as f:
+    with open("results/extractor4.json", "w", encoding="utf-8") as f:
         json.dump({
             "Extracted Documents": len(docs),
             "Documents": [

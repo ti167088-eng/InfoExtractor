@@ -4,3 +4,6 @@ numpy
 PyMuPDF
 Pillow
 langchain
+pandas
+usaddress
+langextract
