@@ -147,7 +147,7 @@ class PDFExtractor:
         return documents
 
 if __name__ == "__main__":
-    path = r"C:\Users\pc\Downloads\Ali Haider -20250917T091038Z-1-002\Ali Haider\Medical Records\Mikhail_Rudin\Mikhail Rudin CN (1).pdf"
+    path = r"C:\Users\pc\Downloads\Mojo Leads-20250917T091038Z-1-001\Mojo Leads\Moiz PART B ORDERS\SAMUEL COLES\SAMUEL COLES CN AND RX BT HIPS (1).pdf"
     extractor = PDFExtractor()
     documents = extractor.text_extractor(path)
     print(f"Extracted {len(documents)} documents")
