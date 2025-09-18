@@ -1,208 +1,209 @@
-# langextract_pipeline.py
+# langchain_extract_pipeline.py
 """
-Pipeline: use your extractor.py to get page texts (langchain.Document objects),
-then run LangExtract to pull structured patient fields: name, dob, address, phone, mrn, etc.
+Use LangChain structured output + Google Gemini (via langchain_google_genai) to extract
+patient_name, date_of_birth and address from the documents produced by extractor.PDFExtractor.
 
-Place this file next to extractor.py. It expects the extractor to return a list
-of langchain.schema.Document objects (the same as your extractor.text_extractor()).
+Requirements:
+  pip install langchain langchain-google-genai
+  (and any deps your extractor requires)
+
+Environment:
+  - Set Google credentials / API key required by langchain-google-genai / Gemini:
+      export GOOGLE_API_KEY="YOUR_KEY"
+  - Or follow the langchain-google-genai docs for auth.
 """
 
-import json
 import os
-from pathlib import Path
+import json
 from typing import List, Dict, Any
 
-# import your extractor (assumes extractor.py defines PDFExtractor)
+# Import your extractor (expects extractor.py present)
 from extractor import PDFExtractor
 
-# LangExtract imports
-# install via: pip install langextract
-try:
-    from langextract import extract, ExampleData
-except ImportError:
-    print("LangExtract not installed. Run: pip install langextract")
-    exit(1)
+# LangChain structured output imports
+from langchain.output_parsers.structured import StructuredOutputParser, ResponseSchema
+from langchain.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage
 
-# ---------------------------
-# 1) Configuration
-# ---------------------------
-PDF_PATH = "C:\\Users\\pc\\Downloads\\Mojo Leads-20250917T091038Z-1-001\\Mojo Leads\\Moiz PPO Orders\\Norman Gibney\\Norman Gibney Rx +LMN.pdf"  # change this to your actual PDF path
+# Google Gemini / LangChain Google integration
+# Install: pip install langchain-google-genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+
+# ----------------------
+# Config
+# ----------------------
+PDF_PATH = "path/to/your.pdf"  # change as needed
 DEBUG_DIR = "debug_ocr"
-OUTPUT_DIR = "langextract_results"
+OUTPUT_DIR = "langchain_results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Choose model (Gemini family)
+GEMINI_MODEL = os.environ.get("LANGCHAIN_GEMINI_MODEL", "gemini-2.5-flash")
 
-# ---------------------------
-# 2) Small helper to convert langchain Document -> single string with page markers
-# ---------------------------
-def docs_to_text_blocks(documents: List[Any],
-                        mode: str = "concat") -> List[Dict[str, Any]]:
+# ----------------------
+# Helper: docs -> text (per-page recommended)
+# ----------------------
+def docs_to_page_texts(documents: List[Any]) -> List[Dict[str, Any]]:
     """
-    Convert your extractor's list of Document objects into blocks LangExtract can consume.
-    mode:
-      - "concat": combine all pages into one big string (with page separators).
-      - "per_page": return one block per page (useful if you want per-page grounding).
-    Returns list of {"id": str, "text": str, "meta": {...}}
+    Convert langchain Document list (from your PDFExtractor) into per-page dicts:
+      {"id": "page_1", "text": "...", "meta": {"page": 1, "source": PDF_PATH}}
     """
-    blocks = []
-    if mode == "concat":
-        all_text = []
-        for d in documents:
-            page_no = d.metadata.get("page", None)
-            header = f"\n\n--- PAGE {page_no} ---\n\n" if page_no else "\n\n--- PAGE ---\n\n"
-            all_text.append(header + (d.page_content or ""))
-        blocks.append({
-            "id": "document_1",
-            "text": "\n".join(all_text),
-            "meta": {
-                "source": PDF_PATH
-            }
+    out = []
+    for i, d in enumerate(documents):
+        page_no = d.metadata.get("page", i + 1)
+        out.append({
+            "id": f"page_{page_no}",
+            "text": d.page_content or "",
+            "meta": {"page": page_no, "source": getattr(d, "metadata", {}).get("source", PDF_PATH)}
         })
-    else:
-        for i, d in enumerate(documents):
-            blocks.append({
-                "id": f"page_{i+1}",
-                "text": d.page_content or "",
-                "meta": {
-                    "page": d.metadata.get("page"),
-                    "source": PDF_PATH
-                }
-            })
-    return blocks
+    return out
 
+# ----------------------
+# Build StructuredOutputParser + Prompt
+# ----------------------
+def build_parser_and_prompt():
+    # Define response schema fields (name + short description)
+    response_schemas = [
+        ResponseSchema(name="patient_name", description="Full patient name (string)"),
+        ResponseSchema(name="date_of_birth", description="Date of birth, MM/DD/YYYY if available (string)"),
+        ResponseSchema(name="address", description="Street, city, state, zip if available (string)")
+    ]
 
-# ---------------------------
-# 3) Define LangExtract schema + few-shot example(s)
-# ---------------------------
-def build_schema_and_examples():
-    """
-    Define expected fields for patient data extraction using langextract.
-    """
-    # Define schema using langextract format
-    schema = {
-        "patient_name": "Full patient name",
-        "date_of_birth": "Patient date of birth", 
-        "address": "Patient address (street, city, state, zip if available)",
-        "phone": "Contact phone number",
-        "medical_record_number": "MRN or patient ID if present",
-        "gender": "Patient gender (Male/Female/Other/Unknown)",
-    }
+    parser = StructuredOutputParser.from_response_schemas(response_schemas)
 
-    # Create examples as required by langextract
-    examples = [
-        ExampleData(
-            text="""Name: HESS, MYRTLE K
+    # The parser gives format instructions to include in the prompt
+    format_instructions = parser.get_format_instructions()
+
+    # Few-shot examples (short) — using your examples
+    few_shot_examples = [
+        """Example 1:
+Name: HESS, MYRTLE K
 DOB: 08/25/1939
 1 Clinic Drive, RICHLANDS, VA 24641-1102
 Phone: (276) 964-2281
-id #686725""",
-            output={
-                "patient_name": "HESS, MYRTLE K",
-                "date_of_birth": "08/25/1939",
-                "address": "1 Clinic Drive, RICHLANDS, VA 24641-1102",
-                "phone": "(276) 964-2281",
-                "medical_record_number": "686725",
-                "gender": None
-            }
-        ),
-        ExampleData(
-            text="""-DOB-08/25/1939 | Address: 112 MAY ST City: RICHLANDS | Patient Phone Number: 2769646189 - Phone Number: 2769641281 | Fax Number: 2769641373""",
-            output={
-                "patient_name": None,
-                "date_of_birth": "08/25/1939",
-                "address": "112 MAY ST, RICHLANDS, VA 24641",
-                "phone": "2769646189",
-                "medical_record_number": None,
-                "gender": None
-            }
-        ),
-        ExampleData(
-            text="""CHRISTINE L ALLEN
+id #686725
+-> patient_name: HESS, MYRTLE K
+   date_of_birth: 08/25/1939
+   address: 1 Clinic Drive, RICHLANDS, VA 24641-1102
+""",
+        """Example 2:
+-DOB-08/25/1939 | Address: 112 MAY ST City: RICHLANDS | Patient Phone Number: 2769646189 - Phone Number: 2769641281 | Fax Number: 2769641373
+-> patient_name: null
+   date_of_birth: 08/25/1939
+   address: 112 MAY ST, RICHLANDS
+""",
+        """Example 3:
+CHRISTINE L ALLEN
 5314 20th St N
 Kalamazoo MI 49004
-Date: 08/04/2025""",
-            output={
-                "patient_name": "CHRISTINE L ALLEN",
-                "date_of_birth": None,
-                "address": "5314 20th St N, Kalamazoo, MI 49004",
-                "phone": None,
-                "medical_record_number": None,
-                "gender": None
-            }
-        )
+Date: 08/04/2025
+-> patient_name: CHRISTINE L ALLEN
+   date_of_birth: null
+   address: 5314 20th St N, Kalamazoo, MI 49004
+"""
     ]
 
-    return schema, examples
+    # Prompt template: we give the format instructions + examples + the page text to extract from.
+    prompt_template = """You are an extraction assistant. Extract the following fields from the INPUT_TEXT:
+{format_instructions}
 
+Few-shot examples (examples show the expected extraction format):
+{few_shot}
 
-# ---------------------------
-# 4) Run pipeline
-# ---------------------------
-def run_langextract_on_documents(documents):
-    """
-    Main extraction pipeline using LangExtract
-    """
-    # Prepare text blocks
-    blocks = docs_to_text_blocks(documents, mode="concat")
+Now extract fields (patient_name, date_of_birth, address) from the INPUT_TEXT below.
+If a field is not present, return null for that field.
 
-    # Build schema and examples
-    schema, examples = build_schema_and_examples()
+INPUT_TEXT:
+{input_text}
 
-    # Get the combined text from all blocks
-    combined_text = "\n\n".join([block["text"] for block in blocks])
+Answer in the format specified above (JSON code block).
+"""
 
-    # Run langextract extraction with proper API
-    try:
-        result = extract(
-            data=combined_text,
-            schema=schema,
-            examples=examples
+    prompt = PromptTemplate(
+        input_variables=["format_instructions", "few_shot", "input_text"],
+        template=prompt_template
+    )
+
+    return parser, prompt, "\n\n".join(few_shot_examples)
+
+# ----------------------
+# Run extraction on documents
+# ----------------------
+def run_extraction(documents: List[Any]):
+    # Convert to per-page texts
+    pages = docs_to_page_texts(documents)
+
+    # Build parser + prompt + few-shot examples
+    parser, prompt_template, few_shot_text = build_parser_and_prompt()
+    format_instructions = parser.get_format_instructions()
+
+    # Initialize Gemini chat model (LangChain wrapper)
+    # Make sure your environment auth is set per langchain-google-genai docs
+    llm = ChatGoogleGenerativeAI(model=GEMINI_MODEL)
+
+    all_results = []
+
+    # Process each page (per-page for precise grounding)
+    for p in pages:
+        input_text = p["text"].strip() or ""
+        if not input_text:
+            continue
+
+        prompt_str = prompt_template.format(
+            format_instructions=format_instructions,
+            few_shot=few_shot_text,
+            input_text=input_text
         )
-    except Exception as e:
-        print(f"LangExtract extraction failed: {e}")
-        result = {"error": str(e)}
 
-    # Save results
-    out_json = os.path.join(OUTPUT_DIR, "patient_extractions.json")
-    with open(out_json, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+        # ChatGoogleGenerativeAI expects messages; wrap as a single human message
+        hm = HumanMessage(content=prompt_str)
 
-    print(f"Extraction JSON written to: {out_json}")
-    return result
+        # Call model
+        resp = llm.invoke([hm])
+        raw = resp.content
 
+        # Parse model output using the StructuredOutputParser
+        try:
+            parsed = parser.parse(raw)
+        except Exception as e:
+            # parsing failure; store raw and error
+            parsed = {"_parse_error": str(e), "_raw": raw}
 
-# ---------------------------
-# 5) CLI / main
-# ---------------------------
+        out = {
+            "page_id": p["id"],
+            "page_no": p["meta"].get("page"),
+            "raw": raw,
+            "parsed": parsed
+        }
+        all_results.append(out)
+
+        # OPTIONAL: save per-page JSON for inspection
+        with open(os.path.join(OUTPUT_DIR, f"{p['id']}_extraction.json"), "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2, ensure_ascii=False)
+
+    # Save combined results
+    with open(os.path.join(OUTPUT_DIR, "combined_extractions.json"), "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+
+    return all_results
+
+# ----------------------
+# CLI main
+# ----------------------
 def main():
-    """
-    Main function to run the complete pipeline
-    """
     if not os.path.exists(PDF_PATH):
-        print(
-            f"PDF not found at {PDF_PATH}. Please update PDF_PATH or provide a valid file."
-        )
+        print(f"PDF not found at {PDF_PATH}. Update PDF_PATH and retry.")
         return
 
-    # Option A: Run extractor live
     print(f"Processing PDF: {PDF_PATH}")
     extractor = PDFExtractor(ocr_confidence_threshold=70, num_workers=4)
     docs = extractor.text_extractor(PDF_PATH, debug_dir=DEBUG_DIR)
-    print(f"Extracted {len(docs)} page documents from {PDF_PATH}")
+    print(f"Extracted {len(docs)} page documents")
 
-    # Option B (commented): read from saved extractor JSON (if you previously stored results)
-    # with open("results/extractor.json", "r", encoding="utf-8") as f:
-    #     saved = json.load(f)
-    #     # convert saved JSON back into blocks for LangExtract if desired
-    #     # (implement conversion depending on saved schema)
-
-    # Run LangExtract pipeline
-    print("Running LangExtract extraction...")
-    result = run_langextract_on_documents(docs)
-
-    print("Pipeline completed successfully!")
-    return result
-
+    print("Running LangChain + Gemini extraction...")
+    results = run_extraction(docs)
+    print(f"Saved extraction files to: {OUTPUT_DIR}")
+    return results
 
 if __name__ == "__main__":
     main()
