@@ -293,7 +293,7 @@ class PDFExtractor:
 # CLI/testing harness
 # -------------------------
 if __name__ == "__main__":
-    sample_pdf = r"C:\Users\pc\Downloads\Mojo Leads-20250917T091038Z-1-001\Mojo Leads\Moiz PPO Orders\Terry Doebler\Terry Doebler CN.pdf"
+    sample_pdf = r"C:\Users\pc\Downloads\old pdf\Ali Haider -20250917T091038Z-1-002\Ali Haider\Medical Records\Doris Moody\Doris Moody CGM DO.pdf"
     extractor = PDFExtractor()
     # set debug_dir to inspect processed page images
     docs = extractor.text_extractor(sample_pdf, debug_dir="debug_ocr")
