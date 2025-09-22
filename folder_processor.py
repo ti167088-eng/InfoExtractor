@@ -1,4 +1,3 @@
-
 import os
 import re
 import pandas as pd
@@ -315,15 +314,22 @@ class FolderProcessor:
 def main():
     """Main function for command line usage"""
     import sys
-    
+
+    # Default folder path - change this to your actual folder path
+    default_folder = r"C:\path\to\your\patient\folders"  # Update this path
+
     if len(sys.argv) < 2:
         print("Usage: python folder_processor.py <path_to_main_folder> [output_excel_file]")
         print("\nExample:")
         print("python folder_processor.py /path/to/patient/folders patient_report.xlsx")
-        return
-    
-    main_folder = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else "patient_data_report.xlsx"
+        print(f"\nOr run without arguments to use default folder: {default_folder}")
+
+        # Use default folder if no arguments provided
+        main_folder = default_folder
+        output_file = "patient_data_report.xlsx"
+    else:
+        main_folder = sys.argv[1]
+        output_file = sys.argv[2] if len(sys.argv) > 2 else "patient_data_report.xlsx"
     
     processor = FolderProcessor()
     processor.run_complete_process(main_folder, output_file)
