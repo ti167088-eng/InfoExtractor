@@ -175,26 +175,19 @@ def image_to_words_pytesseract(pil_img, tesseract_config="--oem 3 --psm 3 -l eng
 # Main extractor class
 # -------------------------
 class PDFExtractor:
-    def __init__(self, ocr_confidence_threshold=70, num_workers=4, tesseract_config="--oem 3 --psm 3 -l eng"):
+    def __init__(self, ocr_confidence_threshold=70, num_workers=4, tesseract_config="--oem 3 --psm 3 -l eng", process_only_do_pdfs=True):
         self.ocr_confidence_threshold = ocr_confidence_threshold
         self.num_workers = num_workers
         self.tesseract_config = tesseract_config
+        self.process_only_do_pdfs = process_only_do_pdfs
 
-    def needs_ocr(self, page):
-        """
-        Heuristic: if page.get_text() yields enough text, prefer it.
-        If page has many images and little text, assume OCR required.
-        """
-        try:
-            text = page.get_text().strip()
-        except Exception:
-            return True
-        if len(text) > 150 and re.search(r'\w+\s+\w+', text):
-            return False
-        # if many images but text is short, still try OCR because original text could be layout-only images
-        if len(page.get_images()) > 3 and len(text) < 20:
-            return True
-        return True if len(text) < 100 else False
+    def is_do_pdf(self, pdf_path: str) -> bool:
+        """Check if PDF filename contains 'DO' anywhere - very inclusive"""
+        filename = path.basename(pdf_path)
+
+        # Simple check: if "DO" appears anywhere in filename (case insensitive)
+        # This catches ALL possible formats without being restrictive
+        return 'do' in filename.lower()
 
     def process_page(self, page_index, pdf_path, debug_dir=None):
         """
@@ -255,10 +248,24 @@ class PDFExtractor:
         """
         Orchestrates page processing in parallel using ProcessPoolExecutor.
         Returns a list of Document objects (one per page, in order).
+        Only processes DO PDFs if process_only_do_pdfs=True.
         """
+        # Check if we should skip non-DO PDFs
+        if self.process_only_do_pdfs and not self.is_do_pdf(pdf_path):
+            logger.info(f"Skipping non-DO PDF: {pdf_path}")
+            return [Document(
+                page_content="",
+                metadata={
+                    "page": 1,
+                    "source_pdf": pdf_path,
+                    "skipped": True,
+                    "reason": "Not a DO PDF"
+                }
+            )]
+
         base_doc = fitz.open(pdf_path)
         total_pages = len(base_doc)
-        logger.info(f"Total pages: {total_pages}")
+        logger.info(f"Processing DO PDF - Total pages: {total_pages}")
         base_doc.close()
 
         documents = [None] * total_pages

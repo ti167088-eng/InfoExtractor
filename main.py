@@ -20,7 +20,7 @@ def main():
         pdf_path = sys.argv[1]
     else:
         # Hardcode your PDF path here for testing
-        pdf_path = r"C:\Users\pc\Downloads\old pdf\Ali Haider -20250917T091038Z-1-002\Ali Haider\Medical Records\Donald _Hagen\Donald Hagen  DO.pdf"  # Replace with your actual PDF path
+        pdf_path = r"C:\Users\pc\Downloads\old pdf\Ali Haider -20250917T091038Z-1-002\Ali Haider\Medical Records\Enrique_Bolij\Enrique Bolij DO.pdf" # Replace with your actual PDF path
     
     if not os.path.exists(pdf_path):
         print(f"Error: PDF file '{pdf_path}' not found.")

@@ -1,5 +1,7 @@
 import re
 import json
+import os
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from extractor import PDFExtractor
 
@@ -8,6 +10,14 @@ class DataParser:
 
     def __init__(self):
         self.pdf_extractor = PDFExtractor()
+
+    def is_do_pdf(self, pdf_path: str) -> bool:
+        """Check if PDF filename contains 'DO' anywhere - very inclusive"""
+        filename = Path(pdf_path).name
+
+        # Simple check: if "DO" appears anywhere in filename (case insensitive)
+        # This catches ALL possible formats without being restrictive
+        return 'do' in filename.lower()
 
     def extract_field_after_keyword(self,
                                     text: str,
@@ -47,7 +57,7 @@ class DataParser:
         match = re.search(pattern2, text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-        
+
         # Try pattern 3: "Name: First Last" (without "Patient")
         pattern3 = r'(?<!Patient\s)Name\s*[;:]?\s*([A-Za-z]+)\s+[A-Za-z]+'
         match = re.search(pattern3, text, re.IGNORECASE)
@@ -69,7 +79,7 @@ class DataParser:
         match = re.search(pattern2, text, re.IGNORECASE)
         if match:
             return match.group(1).strip()
-        
+
         # Try pattern 3: "Name: First Last" (without "Patient")
         pattern3 = r'(?<!Patient\s)Name\s*[;:]?\s*[A-Za-z]+\s+([A-Za-z]+)'
         match = re.search(pattern3, text, re.IGNORECASE)
@@ -103,13 +113,13 @@ class DataParser:
             r'First:\s*[A-Za-z]+\s+Last:\s*[A-Za-z]+',
             r'Name:\s*[A-Za-z]+\s+[A-Za-z]+'
         ]
-        
+
         for pattern in patient_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 # Found patient name, now find the section around it
                 start_pos = max(0, match.start() - 50)
-                
+
                 # Look for end of patient section - be more specific about physician markers
                 end_markers = [
                     r'NPI\s*[;:]?\s*\d{10}',  # Physician NPI (10 digits)
@@ -122,18 +132,18 @@ class DataParser:
                     # Look for a second "Address:" that might be physician's
                     r'Address:\s*\d+[^A-Z]*[A-Z]{2}\s+\d{5}.*?Address:\s*\d+'
                 ]
-                
+
                 end_pos = len(text)
                 search_text = text[match.start():]
-                
+
                 for end_pattern in end_markers:
                     end_match = re.search(end_pattern, search_text, re.IGNORECASE)
                     if end_match:
                         end_pos = match.start() + end_match.start()
                         break
-                
+
                 patient_section = text[start_pos:end_pos]
-                
+
                 # Additional check: if we find multiple addresses, keep only up to the first complete address
                 address_matches = list(re.finditer(r'Address:\s*(\d+[^\n]*)', patient_section, re.IGNORECASE))
                 if len(address_matches) > 1:
@@ -145,9 +155,9 @@ class DataParser:
                     if section_break:
                         end_pos = start_pos + first_address_end + section_break.start()
                         patient_section = text[start_pos:end_pos]
-                
+
                 return patient_section
-        
+
         return None
 
     def extract_first_address(self,
@@ -156,83 +166,84 @@ class DataParser:
         """Extract patient address from patient info section"""
         # First, try to find the patient information section
         patient_section = self.find_patient_info_section(text)
-        
+
         if patient_section:
             # Look for address in patient section - be more restrictive
             # Look for "My Address:" first (patient-specific)
-            patient_address_pattern = r'My\s+Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Postal|Phone|ITEM|HCPCS|NPI|Physician|$|\n))'
+            patient_address_pattern = r'My\s+Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Postal|Phone|ITEM|HCPCS|NPI|Physician|$|\n))'
             match = re.search(patient_address_pattern, patient_section, re.IGNORECASE)
-            
+
             if match:
                 address = match.group(1).strip()
                 # Clean and validate - remove any trailing "Address:" pattern
-                address = re.sub(r'\s+Address:\s*.*$', '', address, flags=re.IGNORECASE)
+                address = re.sub(r'\s+Address[;:]\s*.*$', '', address, flags=re.IGNORECASE)
                 address = re.sub(r'\s+', ' ', address)
                 if self.is_valid_address(address):
                     return address
-            
+
             # If no "My Address", look for first "Address:" in patient section
-            general_address_pattern = r'Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Postal|Phone|ITEM|HCPCS|NPI|Physician|$|\n))'
+            # More precise pattern to stop at the next "Address" keyword
+            general_address_pattern = r'Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Postal|Phone|ITEM|HCPCS|NPI|Physician|$|\n))'
             matches = list(re.finditer(general_address_pattern, patient_section, re.IGNORECASE))
-            
+
             if matches:
                 # Take only the first address found in patient section
                 match = matches[0]
                 address = match.group(1).strip()
                 # Clean and validate - remove any trailing "Address:" pattern
-                address = re.sub(r'\s+Address:\s*.*$', '', address, flags=re.IGNORECASE)
+                address = re.sub(r'\s+Address[;:]\s*.*$', '', address, flags=re.IGNORECASE)
                 address = re.sub(r'\s+', ' ', address)
                 if self.is_valid_address(address):
                     return address
-        
+
         # Extended address extraction patterns - try these if patient section doesn't work
         extended_patterns = [
-            # Original "My Address" pattern
-            r'My\s+Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|ITEM|HCPCS|NPI|Physician|$|\n))',
-            
-            # Standard "Address:" patterns
-            r'Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|ITEM|HCPCS|$|\n))',
-            
+            # Original "My Address" pattern - stop at next Address with colon/semicolon
+            r'My\s+Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|ITEM|HCPCS|NPI|Physician|$|\n))',
+
+            # Standard "Address:" patterns - more precise stopping
+            r'Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|ITEM|HCPCS|$|\n))',
+
             # Patient Address patterns
-            r'Patient\s+Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
-            
-            # Street address patterns (common formats)
-            r'(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Boulevard|Blvd\.?)\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
-            
+            r'Patient\s+Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
+
+            # Street address patterns (common formats) - stop at keywords
+            r'(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Boulevard|Blvd\.?)\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
+
             # Numeric address at start of line
-            r'^(\d+\s+[A-Za-z][^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
-            
+            r'^(\d+\s+[A-Za-z][^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
+
             # Address with apartment/unit numbers
-            r'Address\s*[;:]?\s*(\d+[^\n]*?(?:Apt|Suite|Unit|#)\s*[A-Za-z0-9]*[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
-            
+            r'Address\s*[;:]?\s*(\d+[^;:\n]*?(?:Apt|Suite|Unit|#)\s*[A-Za-z0-9]*[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
+
             # PO Box patterns
-            r'(?:P\.?O\.?\s*Box|Post\s+Office\s+Box)\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
-            
+            r'(?:P\.?O\.?\s*Box|Post\s+Office\s+Box)\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))',
+
             # Generic address line patterns
-            r'(?:Home\s+)?Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|ITEM|HCPCS|$|\n))',
-            
+            r'(?:Home\s+)?Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|ITEM|HCPCS|$|\n))',
+
             # Address in context of patient info
-            r'(?:Patient|Client|Member)\s+(?:Home\s+)?Address\s*[;:]?\s*(\d+[^\n]*?)(?=\s*(?:Address:|City:|State:|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))'
+            r'(?:Patient|Client|Member)\s+(?:Home\s+)?Address\s*[;:]?\s*(\d+[^;:\n]*?)(?=\s*(?:Address[;:]|City[;:]|State[;:]|Phone|Patient|Primary|Postal|DOB|Physician|NPI|$|\n))'
         ]
-        
+
         for pattern in extended_patterns:
             if patient_section:
                 # Try pattern in patient section first
                 match = re.search(pattern, patient_section, re.IGNORECASE | re.MULTILINE)
                 if match:
                     address = match.group(1).strip()
-                    # Clean any trailing "Address:" patterns
-                    address = re.sub(r'\s+Address:\s*.*$', '', address, flags=re.IGNORECASE)
+                    # Clean any trailing "Address:" or "Address;" patterns
+                    address = re.sub(r'\s+Address[;:]\s*.*$', '', address, flags=re.IGNORECASE)
                     address = re.sub(r'\s+', ' ', address)
                     if self.is_valid_address(address):
                         return address
-            
+
             # Try pattern in full text
             match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
             if match:
                 address = match.group(1).strip()
-                # Clean any trailing "Address:" patterns
-                address = re.sub(r'\s+Address:\s*.*$', '', address, flags=re.IGNORECASE)
+                # Clean any trailing "Address:" or "Address;" patterns
+                address = re.sub(r'\s+Address[;:]\s*.*$', '', address, flags=re.IGNORECASE)
                 address = re.sub(r'\s+', ' ', address)
                 if self.is_valid_address(address):
                     return address
@@ -243,18 +254,18 @@ class DataParser:
         """Validate if an address looks like a real address"""
         if not address or len(address) > 150:
             return False
-        
+
         # Clean the address
         address_clean = address.strip()
-        
+
         # Must start with a number or PO Box
         if not re.match(r'^(\d+|P\.?O\.?\s*Box)', address_clean, re.IGNORECASE):
             return False
-        
+
         # Must have some letters (street name)
         if not re.search(r'[A-Za-z]', address_clean):
             return False
-            
+
         # Should not contain medical terms
         medical_terms = [
             'orthosis', 'knee', 'medical', 'treatment', 'diagnosis',
@@ -262,11 +273,11 @@ class DataParser:
             'code', 'item', 'description', 'brace', 'device', 'dmepos',
             'supplier', 'authorization', 'certification', 'length of need'
         ]
-        
+
         address_lower = address_clean.lower()
         if any(term in address_lower for term in medical_terms):
             return False
-        
+
         # Should look like a real address (has common address components)
         address_indicators = [
             r'\b(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|way|place|pl|court|ct|circle|cir)\b',
@@ -274,12 +285,12 @@ class DataParser:
             r'^\d+\s+[a-z]',  # Number followed by letter (street name)
             r'p\.?o\.?\s*box\s*\d+',  # PO Box
         ]
-        
+
         has_address_indicator = any(re.search(pattern, address_lower) for pattern in address_indicators)
-        
+
         # Basic length check - real addresses are usually reasonable length
         word_count = len(address_clean.split())
-        
+
         return has_address_indicator and 2 <= word_count <= 10
 
     def extract_city(self, text: str) -> Optional[str]:
@@ -318,7 +329,7 @@ class DataParser:
         """Extract postal code from patient info section first"""
         # First, try to find the patient information section
         patient_section = self.find_patient_info_section(text)
-        
+
         if patient_section:
             # Look for postal code in patient section first
             patterns = [
@@ -326,12 +337,12 @@ class DataParser:
                 r'Postal\s+Code\s*[;:]?\s*(\d{5}(?:-\d{4})?)',
                 r'Postal\s+[Cc][ao]de?\s*[;:]?\s*(\d{5}(?:-\d{4})?)'
             ]
-            
+
             for pattern in patterns:
                 match = re.search(pattern, patient_section, re.IGNORECASE)
                 if match:
                     return match.group(1)
-        
+
         # Fallback: search entire text line by line
         lines = text.split('\n')
         for line in lines:
@@ -382,7 +393,7 @@ class DataParser:
             r'Physician\s+Name\s*[;:]?\s*([A-Za-z\s.]+?)(?=\s*(?:MD|DO|DPM|$|\n|NPI|Address))',
             r'Physician\s*[;:]?\s*([A-Za-z\s.]+?)(?=\s*(?:MD|DO|DPM|$|\n|NPI|Address))'
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -398,18 +409,12 @@ class DataParser:
             r'NPI\s*[;:]?\s*(\d{10})',
             r'National\s+Provider\s+Identifier\s*[;:]?\s*(\d{10})'
         ]
-        
+
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
                 return match.group(1)
         return None
-
-    
-
-    
-
-    
 
     def parse_document_data(self, documents: List[Any]) -> Dict[str, Any]:
         """
@@ -474,11 +479,23 @@ class DataParser:
 
     def process_pdf_file(self,
                          pdf_path: str,
-                         debug_dir: str = None) -> Dict[str, Any]:
+                         debug_dir: str = None,
+                         force_process: bool = False) -> Dict[str, Any]:
         """
         Complete pipeline: Extract PDF text and parse structured data
+        Only processes DO PDFs unless force_process=True
         """
         try:
+            # Check if this is a DO PDF before processing
+            if not force_process and not self.is_do_pdf(pdf_path):
+                return {
+                    "pdf_path": pdf_path,
+                    "error": "Not a DO PDF - skipped processing",
+                    "extracted_fields": None,
+                    "raw_documents": None,
+                    "skipped": True
+                }
+
             # Extract documents from PDF
             documents = self.pdf_extractor.text_extractor(pdf_path, debug_dir)
 
