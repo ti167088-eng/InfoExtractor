@@ -1,4 +1,5 @@
-# extractor.py  (patched)
+
+# extractor_easyocr.py
 import re
 import os
 import gc
@@ -7,12 +8,11 @@ import json
 import time
 import fitz
 import logging
-import pytesseract
+import easyocr
 import numpy as np
 
 from os import path
 from PIL import Image
-from collections import Counter
 from langchain.schema import Document
 from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
 
@@ -120,52 +120,61 @@ def clean_image_for_ocr(pil_img, upscale_min_height=900):
     return Image.fromarray(rgb)
 
 # -------------------------
-# OCR helpers (word-level)
+# OCR helpers (word-level with EasyOCR)
 # -------------------------
-def image_to_words_pytesseract(pil_img, tesseract_config="--oem 3 --psm 3 -l eng"):
+def image_to_words_easyocr(pil_img, reader):
     """
-    Runs pytesseract.image_to_data and returns:
+    Runs EasyOCR and returns:
     - page_text (constructed from words, with spaces)
     - words: list of dicts {text, conf (0..100), bbox=(x,y,w,h), start,end}
     - mean_conf (0..100)
     This function builds character offsets by joining words with spaces consistently.
     """
     try:
-        # pytesseract accepts PIL.Image
-        data = pytesseract.image_to_data(pil_img, output_type=pytesseract.Output.DICT, config=tesseract_config)
+        # Convert PIL to numpy array for EasyOCR
+        img_array = np.array(pil_img)
+        
+        # EasyOCR readtext returns list of [bbox, text, confidence]
+        results = reader.readtext(img_array)
     except Exception as e:
-        logger.warning(f"pytesseract.image_to_data failed: {e}")
+        logger.warning(f"EasyOCR readtext failed: {e}")
         return "", [], 0.0
 
     words = []
     char_ptr = 0
     confs = []
-    num_items = len(data.get('text', []))
-    for i in range(num_items):
-        txt = str(data['text'][i]).strip()
+    
+    for detection in results:
+        bbox_coords, txt, conf = detection
+        txt = txt.strip()
         if not txt:
-            # still advance pointer for consistent mapping? skip adding space
             continue
-        left = int(data.get('left', [0]*num_items)[i])
-        top = int(data.get('top', [0]*num_items)[i])
-        width = int(data.get('width', [0]*num_items)[i])
-        height = int(data.get('height', [0]*num_items)[i])
-        try:
-            conf_raw = data.get('conf', [])[i]
-            conf = float(conf_raw) if conf_raw not in ("", "-1") else -1.0
-        except Exception:
-            try:
-                conf = float(str(data.get('conf', [])[i]))
-            except Exception:
-                conf = -1.0
+            
+        # EasyOCR bbox is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+        # Convert to (left, top, width, height)
+        x_coords = [point[0] for point in bbox_coords]
+        y_coords = [point[1] for point in bbox_coords]
+        left = int(min(x_coords))
+        top = int(min(y_coords))
+        width = int(max(x_coords) - min(x_coords))
+        height = int(max(y_coords) - min(y_coords))
+        
+        # Convert confidence to 0-100 scale
+        confidence = float(conf * 100)
+        
         start = char_ptr
-        # append with a single space separator (we reconstruct text as words joined by single spaces)
         token_text = txt
         char_ptr += len(token_text) + 1
         end = char_ptr - 1
-        words.append({"text": token_text, "conf": conf, "bbox": (left, top, width, height), "start": start, "end": end})
-        if conf >= 0:
-            confs.append(conf)
+        
+        words.append({
+            "text": token_text, 
+            "conf": confidence, 
+            "bbox": (left, top, width, height), 
+            "start": start, 
+            "end": end
+        })
+        confs.append(confidence)
 
     page_text = " ".join([w['text'] for w in words])
     mean_conf = float(sum(confs) / len(confs)) if confs else 0.0
@@ -174,20 +183,37 @@ def image_to_words_pytesseract(pil_img, tesseract_config="--oem 3 --psm 3 -l eng
 # -------------------------
 # Main extractor class
 # -------------------------
-class PDFExtractor:
-    def __init__(self, ocr_confidence_threshold=70, num_workers=4, tesseract_config="--oem 3 --psm 3 -l eng", process_only_do_pdfs=True):
+class PDFExtractorEasyOCR:
+    def __init__(self, ocr_confidence_threshold=70, num_workers=4, languages=['en'], gpu=False, process_only_do_pdfs=True):
         self.ocr_confidence_threshold = ocr_confidence_threshold
         self.num_workers = num_workers
-        self.tesseract_config = tesseract_config
+        self.languages = languages
+        self.gpu = gpu
         self.process_only_do_pdfs = process_only_do_pdfs
+        # Initialize EasyOCR reader
+        logger.info(f"Initializing EasyOCR with languages: {languages}, GPU: {gpu}")
+        self.reader = easyocr.Reader(languages, gpu=gpu)
 
     def is_do_pdf(self, pdf_path: str) -> bool:
         """Check if PDF filename contains 'DO' anywhere - very inclusive"""
         filename = path.basename(pdf_path)
-
-        # Simple check: if "DO" appears anywhere in filename (case insensitive)
-        # This catches ALL possible formats without being restrictive
         return 'do' in filename.lower()
+
+    def needs_ocr(self, page):
+        """
+        Determine if a page needs OCR based on text content quality.
+        """
+        try:
+            text = page.get_text().strip()
+            if not text or len(text) < 50:
+                return True
+            # Check if text seems garbled (high ratio of special chars)
+            special_chars = sum(1 for c in text if not c.isalnum() and not c.isspace())
+            if special_chars / len(text) > 0.3:
+                return True
+            return False
+        except Exception:
+            return True
 
     def process_page(self, page_index, pdf_path, debug_dir=None):
         """
@@ -217,25 +243,25 @@ class PDFExtractor:
                 return Document(page_content=clean_extracted_text(text_layer), metadata=metadata)
 
             # else rasterize and OCR the page
-            pix = page.get_pixmap(dpi=300)  # reasonable default DPI
+            pix = page.get_pixmap(dpi=300)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
             processed_image = clean_image_for_ocr(img)
             # optional debug dump
             if debug_dir:
                 os.makedirs(debug_dir, exist_ok=True)
-                debug_path = os.path.join(debug_dir, f"page_{page_index+1:03d}_preocr.png")
+                debug_path = os.path.join(debug_dir, f"page_{page_index+1:03d}_preocr_easyocr.png")
                 try:
                     processed_image.save(debug_path)
                 except Exception:
                     pass
 
-            page_text, words, mean_conf = image_to_words_pytesseract(processed_image, self.tesseract_config)
+            page_text, words, mean_conf = image_to_words_easyocr(processed_image, self.reader)
             page_text = clean_extracted_text(page_text)
             metadata.update({
                 "ocr": True,
                 "confidence": mean_conf,
-                "ocr_engine": "Tesseract",
+                "ocr_engine": "EasyOCR",
                 "words": words
             })
             return Document(page_content=page_text, metadata=metadata)
@@ -265,32 +291,25 @@ class PDFExtractor:
 
         base_doc = fitz.open(pdf_path)
         total_pages = len(base_doc)
-        logger.info(f"Processing DO PDF - Total pages: {total_pages}")
+        logger.info(f"Processing DO PDF with EasyOCR - Total pages: {total_pages}")
         base_doc.close()
 
         documents = [None] * total_pages
         start_time = time.time()
 
-        with ProcessPoolExecutor(max_workers=min(self.num_workers, total_pages)) as executor:
-            futures = {executor.submit(self.process_page, i, pdf_path, debug_dir): i for i in range(total_pages)}
-            for future in as_completed(futures):
-                page_index = futures[future]
-                try:
-                    doc = future.result(timeout=120)
-                    documents[page_index] = doc
-                    logger.info(f"Processed page {page_index + 1}/{total_pages} (ocr={doc.metadata.get('ocr')}, conf={doc.metadata.get('confidence', None)})")
-                except TimeoutError:
-                    logger.error(f"Timeout on page {page_index + 1}")
-                    documents[page_index] = Document(
-                        page_content="",
-                        metadata={"page": page_index + 1, "error": "Timeout"}
-                    )
-                except Exception as e:
-                    logger.error(f"Error on page {page_index + 1}: {e}")
-                    documents[page_index] = Document(
-                        page_content="",
-                        metadata={"page": page_index + 1, "error": str(e)}
-                    )
+        # Note: EasyOCR reader is not picklable, so we process sequentially
+        # For parallel processing, each worker would need to initialize its own reader
+        for i in range(total_pages):
+            try:
+                doc = self.process_page(i, pdf_path, debug_dir)
+                documents[i] = doc
+                logger.info(f"Processed page {i + 1}/{total_pages} (ocr={doc.metadata.get('ocr')}, conf={doc.metadata.get('confidence', None)})")
+            except Exception as e:
+                logger.error(f"Error on page {i + 1}: {e}")
+                documents[i] = Document(
+                    page_content="",
+                    metadata={"page": i + 1, "error": str(e)}
+                )
 
         elapsed = time.time() - start_time
         logger.info(f"Extraction completed in {elapsed:.1f}s ({total_pages / (elapsed/60):.1f} pages/min)")
@@ -300,17 +319,17 @@ class PDFExtractor:
 # CLI/testing harness
 # -------------------------
 if __name__ == "__main__":
-    sample_pdf = r"C:\Users\pc\Downloads\old pdf\Mojo Leads-20250917T091038Z-1-001\Mojo Leads\Moiz PART B ORDERS\Ada_Manwarren"
-    extractor = PDFExtractor()
+    sample_pdf = r"C:\Users\pc\Downloads\old pdf\Mojo Leads-20250917T091038Z-1-001\Mojo Leads\Moiz PART B ORDERS\Ada_Manwarren\Ada Manwarren Elbow Cn RX.pdf"
+    extractor = PDFExtractorEasyOCR(languages=['en'], gpu=False)
     # set debug_dir to inspect processed page images
-    docs = extractor.text_extractor(sample_pdf, debug_dir="debug_ocr")
+    docs = extractor.text_extractor(sample_pdf, debug_dir="debug_ocr_easyocr")
     print(f"Extracted {len(docs)} documents")
     for i, d in enumerate(docs[:3]):
         print(f"\nPage {i+1} Content (first 200 chars): {d.page_content[:200]!r}")
         print(f"Metadata: {json.dumps(d.metadata, indent=2) if d.metadata else None}")
 
     os.makedirs("results", exist_ok=True)
-    with open("results/extractor.json", "w", encoding="utf-8") as f:
+    with open("results/extractor_easyocr.json", "w", encoding="utf-8") as f:
         json.dump({
             "Extracted Documents": len(docs),
             "Documents": [
